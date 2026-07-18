@@ -1,5 +1,7 @@
 # WPA-Cracker
 
+> **⚠️ WARNING:** Only use on networks you own or have explicit written authorization to test. Unauthorized network access is illegal under CFAA (US) and similar laws worldwide. This tool is for security research, authorized penetration testing, and educational purposes only.
+
 WPA/WPA2 handshake capture and PSK cracking tool with PMKID support. Uses scapy for monitor-mode capture and on-the-fly handshake detection. Output compatible with aircrack-ng format so you can pipe results into your existing workflows.
 
 > Field notes from a weekend project after realizing aircrack-ng's parsing is arcane and I wanted something that works with scapy directly. IEEE 802.11i terminology throughout because the standard is the standard.

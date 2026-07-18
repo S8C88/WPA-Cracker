@@ -228,18 +228,19 @@ def verify_mic(ptk: bytes, eapol_frame: bytes, mic_to_check: bytes) -> bool:
     
     The MIC covers the EAPOL-Key frame from version through key data,
     with the MIC field set to zero during computation.
+    
+    EAPOL-Key frame layout (IEEE 802.11-2012):
+    Bytes 78-93 = Key MIC (16 bytes)
     """
-    if len(eapol_frame) < 78:
+    if len(eapol_frame) < 95:
         return False
 
-    # Zero out MIC field (bytes 79-95 in the EAPOL key frame)
+    # Zero out MIC field (bytes 78-93 in the EAPOL key frame)
     modified = bytearray(eapol_frame)
-    # The MIC is at offset 79 (0-indexed) in the EAPOL-Key frame
-    if len(modified) >= 95:
-        for j in range(79, 95):
-            modified[j] = 0
+    for j in range(78, 94):
+        modified[j] = 0
 
-    # The key derivation provides a Key Confirmation Key (KCK) as the first 128 bits of PTK
+    # The Key Confirmation Key (KCK) is the first 128 bits of PTK
     kck = ptk[:16]
 
     computed = hmac_mod.new(kck, bytes(modified), hashlib.sha1).digest()[:16]

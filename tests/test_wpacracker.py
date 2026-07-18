@@ -38,15 +38,19 @@ from wpacracker import (
 def _make_eapol_key(msg_num: int, nonce: bytes = None, mic: bytes = None,
                     pmkid: bytes = None) -> bytes:
     """Build a minimal EAPOL-Key frame for testing."""
-    key_info = 0x0100  # Pairwise, Ack (message 1-ish)
+    # key_info bits: bit3=pairwise, bit4=pmkid, bit7=ack, bit8=mic, bit9=secure
     if msg_num == 1:
-        key_info = 0x0108  # Pairwise | Ack | PMKID present
+        key_info = 0x88  # Pairwise (0x08) | Ack (0x80)
+        if pmkid:
+            key_info |= 0x10  # PMKID present (bit 4)
     elif msg_num == 2:
-        key_info = 0x0110  # Pairwise | MIC
+        key_info = 0x0108  # Pairwise (0x08) | MIC (0x100)
     elif msg_num == 3:
-        key_info = 0x01C8  # Pairwise | Ack | MIC | Secure
+        key_info = 0x0388  # Pairwise | Ack | MIC | Secure
     elif msg_num == 4:
-        key_info = 0x0118  # Pairwise | MIC | Secure
+        key_info = 0x0308  # Pairwise | MIC | Secure
+    else:
+        key_info = 0
 
     if nonce is None:
         nonce = b"\x01" * 32
@@ -255,9 +259,9 @@ class TestMICVerification(unittest.TestCase):
         key = b"\x00" * 16  # KCK
         frame = bytearray(_make_eapol_key(2, mic=b"\x00" * 16))
 
-        # Compute proper MIC
+        # Compute proper MIC — zero out MIC field (bytes 78-93)
         modified = bytearray(frame)
-        for j in range(79, 95):
+        for j in range(78, 94):
             modified[j] = 0
         computed_mic = hmac_mod.new(key, bytes(modified), hashlib.sha1).digest()[:16]
 
@@ -486,11 +490,12 @@ class TestCLI(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args([])
 
-    def test_parser_interface_or_read(self):
+    def test_parser_without_i_or_r_parses_ok(self):
         from wpacracker import build_parser
         parser = build_parser()
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["-w", "wordlist.txt"])
+        args = parser.parse_args(["-w", "wordlist.txt"])
+        self.assertIsNone(args.interface)
+        self.assertIsNone(args.read)
 
     def test_parser_with_interface(self):
         from wpacracker import build_parser
