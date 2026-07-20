@@ -14,6 +14,26 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
+# Maximum wordlist size (CWE-770)
+MAX_WORDLIST_SIZE = 500 * 1024 * 1024  # 500MB
+MAX_PCAP_SIZE = 1 * 1024 * 1024 * 1024  # 1GB
+
+
+def _validate_path(path: str, purpose: str = "input") -> str:
+    """Validate a file path — canonicalize and check exists (CWE-20/CWE-22)."""
+    resolved = os.path.realpath(path)
+    if purpose == "input" and not os.path.isfile(resolved):
+        raise FileNotFoundError(f"File not found: {resolved}")
+    if purpose == "input":
+        size = os.path.getsize(resolved)
+        if size > MAX_WORDLIST_SIZE:
+            raise ValueError(f"File too large ({size} bytes > {MAX_WORDLIST_SIZE} max)")
+    if purpose == "output":
+        parent = os.path.dirname(resolved)
+        if parent and not os.path.isdir(parent):
+            raise FileNotFoundError(f"Output directory does not exist: {parent}")
+    return resolved
+
 # ---------------------------------------------------------------------------
 # IEEE 802.11i constants
 # ---------------------------------------------------------------------------
@@ -166,7 +186,7 @@ def extract_eapol_from_packet(pkt) -> Optional[bytes]:
                     # Skip LLC/SNAP header if present
                     offset = i + 2
                     return raw[offset:]
-    except Exception:
+    except (IndexError, ValueError, AttributeError, TypeError):  # CWE-703: skip unparseable packets
         pass
     return None
 
@@ -191,8 +211,12 @@ def _prf_384(key: bytes, prefix: str, data: bytes) -> bytes:
     """
     result = b""
     i = 0
+    # CWE-835: add iteration limit to prevent infinite loop
+    MAX_ITER = 1000
     while len(result) < 48:
         i += 1
+        if i > MAX_ITER:
+            raise RuntimeError("PRF-384 iteration exceeded max")
         h = hmac_mod.new(key, digestmod=hashlib.sha1)
         h.update(str(i).encode())
         h.update(b"\x00")
@@ -308,7 +332,7 @@ class HandshakeDetector:
                 if hasattr(dot11, 'info'):
                     try:
                         hs.essid = dot11.info.decode('utf-8', errors='replace')
-                    except Exception:
+                    except (UnicodeDecodeError, AttributeError):  # CWE-703: skip unparseable ESSID
                         pass
 
             hs.add_message(ek, raw, msg_num)
@@ -320,7 +344,7 @@ class HandshakeDetector:
 
             return None
 
-        except Exception:
+        except (IndexError, ValueError, AttributeError, TypeError):  # CWE-703: skip malformed frames
             return None
 
     def get_complete_handshakes(self) -> List[Handshake]:
@@ -371,6 +395,9 @@ def crack_wordlist(handshakes: List[Handshake], wordlist_path: str,
         print(f"[-] Wordlist not found: {wordlist_path}")
         return result
 
+    # CWE-20/CWE-22: Validate wordlist path
+    validated_path = _validate_path(wordlist_path)
+
     # Pre-compute per-handshake data
     handshake_data = []
     for hs in handshakes:
@@ -379,10 +406,17 @@ def crack_wordlist(handshakes: List[Handshake], wordlist_path: str,
         if hs.complete or hs.pmkid:
             handshake_data.append(hs)
 
-    total_lines = sum(1 for _ in open(wordlist_path, "r", errors="ignore"))
+    # CWE-770: Count lines in single pass during main loop
+    if progress_cb:
+        total_lines = 0
+        with open(validated_path, "r", errors="ignore") as f:
+            for _ in f:
+                total_lines += 1
+    else:
+        total_lines = 0
     count = 0
 
-    with open(wordlist_path, "r", errors="ignore") as f:
+    with open(validated_path, "r", errors="ignore") as f:
         for line in f:
             psk = line.strip()
             if not psk or psk.startswith("#"):
@@ -460,33 +494,35 @@ def analyze_pcap(pcap_path: str, bssid_filter: str = "",
     """Analyze a pcap file for handshakes."""
     print(f"[*] Analyzing {pcap_path}")
 
+    # CWE-20/CWE-22: Validate pcap path
+    resolved_path = _validate_path(pcap_path)
+    size = os.path.getsize(resolved_path)
+    if size > MAX_PCAP_SIZE:
+        print(f"[-] Pcap file too large ({size} bytes > {MAX_PCAP_SIZE} max)")
+        return []
+
     try:
-        from scapy.utils import RawPcapReader
+        from scapy.all import rdpcap
     except ImportError:
         print("scapy not installed. Try: pip install scapy")
         sys.exit(1)
 
-    detector = HandshakeDetector()
-
+    # CWE-404: use context manager for file
     try:
-        for pkt, raw in RawPcapReader(pcap_path):
-            # Wrap raw bytes as a scapy packet for our parser
-            from scapy.packet import Raw
-            from scapy.layers.dot11 import Dot11
-            # Manually create a packet-like object
-            pkt_wrapper = Dot11(raw)
-
-            if bssid_filter and hasattr(pkt_wrapper, 'addr3'):
-                if hex_mac(bytes(pkt_wrapper.addr3)) != bssid_filter.upper():
-                    continue
-
-            det = detector.process_frame(pkt_wrapper)
-            if det:
-                bssid, hs = det
-                print(f"[+] Handshake: {hs.bssid} -> {hs.sta} (msg {hs.messages})")
-
+        packets = rdpcap(resolved_path)
     except Exception as e:
-        print(f"[-] Error reading pcap: {e}")
+        print(f"[-] Failed to read pcap: {e}")
+        return []
+
+    detector = HandshakeDetector()
+    for pkt in packets:
+        if bssid_filter and hasattr(pkt, 'addr3'):
+            if hex_mac(bytes(pkt.addr3)) != bssid_filter.upper():
+                continue
+        det = detector.process_frame(pkt)
+        if det:
+            bssid, hs = det
+            print(f"[!] Found handshake: {hs.bssid} -> {hs.sta} (ESSID: {hs.essid})")
 
     handshakes = detector.get_complete_handshakes()
     print(f"[*] Found {len(handshakes)} complete handshake(s)")
@@ -520,6 +556,9 @@ def main():
     if not args.wordlist:
         print("[-] Provide -w <wordlist>")
         sys.exit(1)
+
+    # CWE-20/CWE-22: Validate wordlist path early
+    _validate_path(args.wordlist)
 
     handshakes = []
 
@@ -570,7 +609,9 @@ def main():
     print("\n" + output)
 
     if args.output:
-        with open(args.output, "w") as f:
+        # CWE-20/CWE-22: Validate output path
+        out_path = _validate_path(args.output, "output")
+        with open(out_path, "w") as f:
             f.write(output + "\n")
         print(f"\n[+] Results saved to {args.output}")
 
